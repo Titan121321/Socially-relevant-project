@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>EcoCycle Smart Kiosk</title>
     <link rel="stylesheet" href="style.css">
-    <!-- Edge Impulse WASM Web SDK (Optional: Load real model bundle here) -->
-    <!-- <script src="edge-impulse-standalone.js"></script> -->
 </head>
 <body>
     <div class="kiosk-container">
@@ -40,8 +38,10 @@
                     <span class="status-dot disconnected" id="esp-dot"></span>
                     <div class="status-info">
                         <span class="label">ESP32 (Server Serial)</span>
-                        <span class="val" id="esp-status-text">Disconnected</span>
+                        <span class="val" id="esp-status-text">Connection Lost</span>
                     </div>
+                    <!-- Added Connect / Reconnect Button -->
+                    <button id="btn-connect-esp32" class="btn btn-sm btn-primary" style="margin-left: auto;">Connect ESP32</button>
                 </div>
                 <div class="status-item" id="ml-status-card">
                     <span class="status-dot pending" id="ml-dot"></span>
@@ -127,14 +127,13 @@
                 <button id="btn-clear-log" class="btn btn-sm btn-text">Clear Log</button>
             </div>
             <div class="log-container" id="log-container">
-                <div class="log-entry sys">[SYSTEM] Kiosk web application initialized. Server-sent events connected.</div>
+                <div class="log-entry sys">[SYSTEM] Kiosk web application initialized.</div>
             </div>
         </footer>
     </div>
 
-    <!-- Application JavaScript Integration Script -->
+    <!-- Application Script -->
     <script>
-        // Live UI sync via Server-Sent Events from Node.js server
         const sysStateBadge = document.getElementById('sys-state-badge');
         const captureBadge = document.getElementById('capture-badge');
         const espStatusText = document.getElementById('esp-status-text');
@@ -144,6 +143,7 @@
         const btnVerify = document.getElementById('btn-verify');
         const instructionBox = document.getElementById('instruction-box');
         const logContainer = document.getElementById('log-container');
+        const btnConnectEsp32 = document.getElementById('btn-connect-esp32');
 
         function logMessage(msg) {
             const div = document.createElement('div');
@@ -152,6 +152,29 @@
             logContainer.appendChild(div);
             logContainer.scrollTop = logContainer.scrollHeight;
         }
+
+        // Connect ESP32 Button Action
+        btnConnectEsp32.addEventListener('click', async () => {
+            btnConnectEsp32.innerText = 'Connecting...';
+            try {
+                const response = await fetch('/connect-serial', { method: 'POST' });
+                const data = await response.json();
+                if (data.connected) {
+                    espDot.className = 'status-dot connected';
+                    espStatusText.innerText = 'Connected';
+                    btnConnectEsp32.innerText = 'Connected';
+                    logMessage('Successfully connected to ESP32 serial port.');
+                } else {
+                    espDot.className = 'status-dot disconnected';
+                    espStatusText.innerText = 'Connection Lost';
+                    btnConnectEsp32.innerText = 'Retry Connect';
+                    logMessage('Failed to connect to ESP32 port. Check USB cable and COM port.');
+                }
+            } catch (err) {
+                logMessage('Error triggering serial connection: ' + err.message);
+                btnConnectEsp32.innerText = 'Retry Connect';
+            }
+        });
 
         // Initialize Webcam Access
         const videoElement = document.getElementById('webcam-feed');
@@ -173,8 +196,6 @@
         const evtSource = new EventSource('/events');
         
         evtSource.onopen = () => {
-            espDot.className = 'status-dot connected';
-            espStatusText.innerText = 'Connected (Server Bridge)';
             logMessage('Connected to server event stream.');
         };
 
@@ -185,6 +206,17 @@
 
         evtSource.onmessage = function(event) {
             const data = JSON.parse(event.data);
+            if (data.type === 'esp_status') {
+                if (data.connected) {
+                    espDot.className = 'status-dot connected';
+                    espStatusText.innerText = 'Connected';
+                    btnConnectEsp32.innerText = 'Connected';
+                } else {
+                    espDot.className = 'status-dot disconnected';
+                    espStatusText.innerText = 'Connection Lost';
+                    btnConnectEsp32.innerText = 'Connect ESP32';
+                }
+            }
             if (data.type === 'state') {
                 const state = data.state;
                 sysStateBadge.innerText = state;
@@ -199,8 +231,6 @@
                     captureBadge.innerText = 'Item Detected (READY)';
                     btnVerify.disabled = false;
                     instructionBox.innerText = 'Item detected by IR! Click Verify to classify & sort.';
-                    
-                    // Automatically capture frame on READY trigger if desired
                     triggerAutoCapture();
                 } else if (state === 'SORTING') {
                     sysStateBadge.style.background = '#2980b9';
@@ -212,7 +242,6 @@
             }
         };
 
-        // Manual or Automatic Capture & Classify Routine
         const canvas = document.getElementById('capture-canvas');
         const resCategory = document.getElementById('res-category');
         const resConfidence = document.getElementById('res-confidence');
@@ -224,9 +253,7 @@
             canvas.width = videoElement.videoWidth || 400;
             canvas.height = videoElement.videoHeight || 300;
             context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-            
             document.getElementById('canvas-placeholder').style.display = 'none';
-            logMessage('Captured frame snapshot from live feed.');
         }
 
         btnVerify.addEventListener('click', async () => {
@@ -236,7 +263,6 @@
 
                 btnVerify.disabled = true;
                 instructionBox.innerText = 'Running inference & sending sort command...';
-                logMessage('Sending image to backend for classification...');
 
                 try {
                     const response = await fetch('/classify', {
@@ -252,16 +278,14 @@
                     resTimestamp.innerText = new Date().toLocaleTimeString();
 
                     instructionBox.innerText = `Successfully sorted into bin: ${data.classification.toUpperCase()}`;
-                    logMessage(`Item classified as ${data.classification} (${confPercent}%). Sorting command dispatched to ESP32.`);
+                    logMessage(`Item classified as ${data.classification} (${confPercent}%). Sorting command dispatched.`);
                 } catch (err) {
                     instructionBox.innerText = 'Error processing classification.';
-                    logMessage('Classification request failed: ' + err.message);
                     btnVerify.disabled = false;
                 }
             }, 'image/jpeg');
         });
 
-        // Clock updater
         setInterval(() => {
             document.getElementById('clock').innerText = new Date().toLocaleTimeString();
         }, 1000);

@@ -4,47 +4,74 @@ const path = require('path');
 const fs = require('fs');
 const { SerialPort, ReadlineParser } = require('serialport');
 
-// Import your Edge Impulse classifier runner 
-// (Update the path if your files are structured differently)
-// const classifier = require('./model/edge-impulse-standalone.js');
-
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
 app.use(express.static('public'));
 
-// --- SERIAL CONFIGURATION WITH ESP32 ---
-const SERIAL_PORT_PATH = 'COM3'; // Replace with your ESP32's actual COM port (e.g., 'COM3' or '/dev/ttyUSB0')
+const SERIAL_PORT_PATH = 'COM3'; // Change to your ESP32's actual COM port
 const BAUD_RATE = 115200;
 
-let espPort;
+let espPort = null;
 let currentSensorState = "IDLE";
 let clients = [];
 
-try {
-    espPort = new SerialPort({ path: SERIAL_PORT_PATH, baudRate: BAUD_RATE });
-    const parser = espPort.pipe(new ReadlineParser({ delimiter: '\r\n' }));
+function initSerial() {
+    if (espPort && espPort.isOpen) return;
+    
+    try {
+        espPort = new SerialPort({ path: SERIAL_PORT_PATH, baudRate: BAUD_RATE });
+        const parser = espPort.pipe(new ReadlineParser({ delimiter: '\r\n' }));
 
-    parser.on('data', (data) => {
-        data = data.trim();
-        console.log(`[ESP32 Hardware]: ${data}`);
-        
-        // Listen to states coming from ESP32 IR sensor
-        if (data === "IDLE" || data === "READY" || data === "SORTING") {
-            currentSensorState = data;
-            broadcastToClients({ type: 'state', state: currentSensorState });
-        }
-    });
-} catch (err) {
-    console.error("Warning: Could not open serial port. Running in offline/simulation mode.", err.message);
+        espPort.on('open', () => {
+            console.log(`[Serial]: Connected to port ${SERIAL_PORT_PATH}`);
+            broadcastToClients({ type: 'esp_status', connected: true });
+        });
+
+        parser.on('data', (data) => {
+            data = data.trim();
+            console.log(`[ESP32 Hardware]: ${data}`);
+            if (data === "IDLE" || data === "READY" || data === "SORTING") {
+                currentSensorState = data;
+                broadcastToClients({ type: 'state', state: currentSensorState });
+            }
+        });
+
+        espPort.on('error', (err) => {
+            console.error("[Serial Error]:", err.message);
+            broadcastToClients({ type: 'esp_status', connected: false });
+        });
+
+        espPort.on('close', () => {
+            console.log("[Serial]: Port closed.");
+            broadcastToClients({ type: 'esp_status', connected: false });
+        });
+
+    } catch (err) {
+        console.error("Failed to initialize serial port:", err.message);
+    }
 }
 
-// Broadcast hardware state changes to all connected browser clients
+// Try initial connection on startup
+initSerial();
+
 function broadcastToClients(data) {
     clients.forEach(client => client.write(`data: ${JSON.stringify(data)}\n\n`));
 }
 
-// SSE Endpoint to keep the browser updated with ESP32 status
+// Endpoint to manually trigger a reconnect from the frontend webpage button
+app.post('/connect-serial', (req, res) => {
+    try {
+        if (!espPort || !espPort.isOpen) {
+            initSerial();
+        }
+        const connected = espPort && espPort.isOpen;
+        res.json({ success: true, connected, state: currentSensorState });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 app.get('/events', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -52,13 +79,13 @@ app.get('/events', (req, res) => {
     
     clients.push(res);
     res.write(`data: ${JSON.stringify({ type: 'state', state: currentSensorState })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'esp_status', connected: (espPort && espPort.isOpen) })}\n\n`);
 
     req.on('close', () => {
         clients = clients.filter(client => client !== res);
     });
 });
 
-// --- CLASSIFICATION & SORTING ENDPOINT ---
 app.post('/classify', upload.array('image', 1), async (req, res) => {
     try {
         if (!req.files || req.files.length === 0) {
@@ -66,34 +93,20 @@ app.post('/classify', upload.array('image', 1), async (req, res) => {
         }
 
         const filePath = path.join(__dirname, req.files[0].path);
-
-        // --- RUN EDGE IMPULSE INFERENCE ---
-        // const result = await classifier.classify(filePath);
-        // const classification = result.classification; // e.g., 'plastic'
-        // const confidence = result.confidence;
-
-        // Simulated Classification (Replace above when your model runner is linked)
+        
+        // Mock classification result (replace with actual Edge Impulse model call if configured)
         const possibleBins = ["plastic", "paper", "metal", "food"];
         const classification = possibleBins[Math.floor(Math.random() * possibleBins.length)];
         const confidence = 0.96;
 
-        // Clean up temporary uploaded image file
         fs.unlinkSync(filePath);
 
-        // Send sorting command to ESP32 over USB Serial
         if (espPort && espPort.isOpen) {
-            console.p(`Sending command to ESP32: SORT:${classification}`);
+            console.log(`Sending command to ESP32: SORT:${classification}`);
             espPort.write(`SORT:${classification}\n`);
-        } else {
-            console.log(`[Simulation] Would send: SORT:${classification}`);
         }
 
-        // Return results back to the webpage
-        res.json({
-            classification,
-            confidence
-        });
-
+        res.json({ classification, confidence });
     } catch (err) {
         console.error("Inference Error:", err);
         res.status(500).json({ error: 'Model classification failed' });
@@ -101,5 +114,5 @@ app.post('/classify', upload.array('image', 1), async (req, res) => {
 });
 
 app.listen(3000, () => {
-    console.log('Server is running live at http://localhost:3000');
+    console.log('Server running live at http://localhost:3000');
 });
