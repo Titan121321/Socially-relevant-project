@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EcoCycle Smart Kiosk</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Edge Impulse WASM Web SDK (Optional: Load real model bundle here) -->
+    <!-- <script src="edge-impulse-standalone.js"></script> -->
+</head>
+<body>
+    <div class="kiosk-container">
+        <!-- Header -->
+        <header class="kiosk-header">
+            <div class="logo-title">
+                <span class="icon">♻️</span>
+                <div>
+                    <h1>EcoCycle Smart Kiosk</h1>
+                    <p class="tagline">Identify. Verify. Recycle.</p>
+                </div>
+            </div>
+            <div class="header-status">
+                <div class="sys-state-badge" id="sys-state-badge">INITIALIZING</div>
+                <div class="clock" id="clock">00:00:00 AM</div>
+            </div>
+        </header>
+
+        <!-- Hardware Connection Panel -->
+        <section class="hardware-panel card">
+            <h2>Hardware & Module Status</h2>
+            <div class="status-grid">
+                <div class="status-item" id="cam-status-card">
+                    <span class="status-dot disconnected" id="cam-dot"></span>
+                    <div class="status-info">
+                        <span class="label">Webcam</span>
+                        <span class="val" id="cam-status-text">Disconnected</span>
+                    </div>
+                </div>
+                <div class="status-item" id="esp-status-card">
+                    <span class="status-dot disconnected" id="esp-dot"></span>
+                    <div class="status-info">
+                        <span class="label">ESP32 (Server Serial)</span>
+                        <span class="val" id="esp-status-text">Disconnected</span>
+                    </div>
+                </div>
+                <div class="status-item" id="ml-status-card">
+                    <span class="status-dot pending" id="ml-dot"></span>
+                    <div class="status-info">
+                        <span class="label">ML Model</span>
+                        <span class="val" id="ml-status-text">Placeholder Mode</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Dashboard Grid -->
+        <main class="dashboard-grid">
+            <!-- Left Column: Scanner Panel -->
+            <section class="scanner-panel card">
+                <div class="panel-header">
+                    <h2>Live Vision & Capture</h2>
+                    <span class="capture-trigger-badge" id="capture-badge">IR Trigger Idle</span>
+                </div>
+                
+                <div class="viewports">
+                    <div class="viewport-box">
+                        <span class="viewport-label">Live Feed</span>
+                        <video id="webcam-feed" autoplay playsinline muted></video>
+                        <div class="camera-overlay" id="camera-overlay">
+                            <span>Camera Offline</span>
+                        </div>
+                    </div>
+                    <div class="viewport-box">
+                        <span class="viewport-label">Captured Frame</span>
+                        <canvas id="capture-canvas"></canvas>
+                        <div class="canvas-placeholder" id="canvas-placeholder">
+                            <span>Awaiting IR Sensor Event</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: Result & Action Panel -->
+            <section class="action-panel card">
+                <h2>Waste Classification</h2>
+                
+                <div class="result-display">
+                    <div class="result-category" id="res-category">---</div>
+                    <div class="result-meta">
+                        <div class="meta-box">
+                            <span class="meta-label">Confidence</span>
+                            <span class="meta-value" id="res-confidence">0%</span>
+                        </div>
+                        <div class="meta-box">
+                            <span class="meta-label">Detection Time</span>
+                            <span class="meta-value" id="res-timestamp">--:--:--</span>
+                        </div>
+                    </div>
+                    <div class="confidence-bar-bg">
+                        <div class="confidence-bar-fill" id="confidence-bar"></div>
+                    </div>
+                </div>
+
+                <div class="instruction-box" id="instruction-box">
+                    Ready for next item. Place item near IR sensor.
+                </div>
+
+                <!-- Verification Action Area -->
+                <div class="verification-area">
+                    <button id="btn-verify" class="btn btn-xl btn-success" disabled>
+                        WASTE VERIFIED & SORT
+                    </button>
+                    <p class="verification-hint">Triggers automated sorting command to the ESP32 hardware.</p>
+                </div>
+
+                <!-- Controls -->
+                <div class="reset-controls">
+                    <button id="btn-reset-cycle" class="btn btn-secondary">Reset Current Cycle</button>
+                </div>
+            </section>
+        </main>
+
+        <!-- Activity Log -->
+        <footer class="activity-log card">
+            <div class="log-header">
+                <h2>System Activity Log</h2>
+                <button id="btn-clear-log" class="btn btn-sm btn-text">Clear Log</button>
+            </div>
+            <div class="log-container" id="log-container">
+                <div class="log-entry sys">[SYSTEM] Kiosk web application initialized. Server-sent events connected.</div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Application JavaScript Integration Script -->
+    <script>
+        // Live UI sync via Server-Sent Events from Node.js server
+        const sysStateBadge = document.getElementById('sys-state-badge');
+        const captureBadge = document.getElementById('capture-badge');
+        const espStatusText = document.getElementById('esp-status-text');
+        const espDot = document.getElementById('esp-dot');
+        const camDot = document.getElementById('cam-dot');
+        const camStatusText = document.getElementById('cam-status-text');
+        const btnVerify = document.getElementById('btn-verify');
+        const instructionBox = document.getElementById('instruction-box');
+        const logContainer = document.getElementById('log-container');
+
+        function logMessage(msg) {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            div.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logContainer.appendChild(div);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // Initialize Webcam Access
+        const videoElement = document.getElementById('webcam-feed');
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+                videoElement.srcObject = stream;
+                camDot.className = 'status-dot connected';
+                camStatusText.innerText = 'Active';
+                document.getElementById('camera-overlay').style.display = 'none';
+                logMessage('Webcam initialized successfully.');
+            })
+            .catch(err => {
+                camDot.className = 'status-dot disconnected';
+                camStatusText.innerText = 'Error / Blocked';
+                logMessage('Webcam access failed: ' + err.message);
+            });
+
+        // Setup SSE connection to track ESP32 IR Sensor State from Node.js server
+        const evtSource = new EventSource('/events');
+        
+        evtSource.onopen = () => {
+            espDot.className = 'status-dot connected';
+            espStatusText.innerText = 'Connected (Server Bridge)';
+            logMessage('Connected to server event stream.');
+        };
+
+        evtSource.onerror = () => {
+            espDot.className = 'status-dot disconnected';
+            espStatusText.innerText = 'Connection Lost';
+        };
+
+        evtSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.type === 'state') {
+                const state = data.state;
+                sysStateBadge.innerText = state;
+                
+                if (state === 'IDLE') {
+                    sysStateBadge.style.background = '#e67e22';
+                    captureBadge.innerText = 'IR Trigger Idle';
+                    btnVerify.disabled = true;
+                    instructionBox.innerText = 'Waiting for item in IR range...';
+                } else if (state === 'READY') {
+                    sysStateBadge.style.background = '#27ae60';
+                    captureBadge.innerText = 'Item Detected (READY)';
+                    btnVerify.disabled = false;
+                    instructionBox.innerText = 'Item detected by IR! Click Verify to classify & sort.';
+                    
+                    // Automatically capture frame on READY trigger if desired
+                    triggerAutoCapture();
+                } else if (state === 'SORTING') {
+                    sysStateBadge.style.background = '#2980b9';
+                    captureBadge.innerText = 'Sorting in Progress';
+                    btnVerify.disabled = true;
+                    instructionBox.innerText = 'Sorting mechanism operating... Please wait.';
+                }
+                logMessage(`ESP32 Hardware State Update: ${state}`);
+            }
+        };
+
+        // Manual or Automatic Capture & Classify Routine
+        const canvas = document.getElementById('capture-canvas');
+        const resCategory = document.getElementById('res-category');
+        const resConfidence = document.getElementById('res-confidence');
+        const confidenceBar = document.getElementById('confidence-bar');
+        const resTimestamp = document.getElementById('res-timestamp');
+
+        async function triggerAutoCapture() {
+            const context = canvas.getContext('2d');
+            canvas.width = videoElement.videoWidth || 400;
+            canvas.height = videoElement.videoHeight || 300;
+            context.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+            
+            document.getElementById('canvas-placeholder').style.display = 'none';
+            logMessage('Captured frame snapshot from live feed.');
+        }
+
+        btnVerify.addEventListener('click', async () => {
+            canvas.toBlob(async (blob) => {
+                const formData = new FormData();
+                formData.append('image', blob, 'captured.jpg');
+
+                btnVerify.disabled = true;
+                instructionBox.innerText = 'Running inference & sending sort command...';
+                logMessage('Sending image to backend for classification...');
+
+                try {
+                    const response = await fetch('/classify', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const data = await response.json();
+                    
+                    resCategory.innerText = data.classification.toUpperCase();
+                    const confPercent = (data.confidence * 100).toFixed(1);
+                    resConfidence.innerText = confPercent + '%';
+                    confidenceBar.style.width = confPercent + '%';
+                    resTimestamp.innerText = new Date().toLocaleTimeString();
+
+                    instructionBox.innerText = `Successfully sorted into bin: ${data.classification.toUpperCase()}`;
+                    logMessage(`Item classified as ${data.classification} (${confPercent}%). Sorting command dispatched to ESP32.`);
+                } catch (err) {
+                    instructionBox.innerText = 'Error processing classification.';
+                    logMessage('Classification request failed: ' + err.message);
+                    btnVerify.disabled = false;
+                }
+            }, 'image/jpeg');
+        });
+
+        // Clock updater
+        setInterval(() => {
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString();
+        }, 1000);
+    </script>
+</body>
+</html>
